@@ -59,6 +59,18 @@ const (
 	defaultVideoSourceFPS = 24 // strided frames: duration*sourceFPS/frameStride
 	// videoTokenFactor maps a frame's pixels to placeholder tokens (width*height/factor).
 	videoTokenFactor = 1024
+
+	// Audio estimation modes.
+	audioModeDynamic = "dynamic"
+	audioModeStatic  = "static"
+	// defaultAudioDuration is the fallback clip length in seconds, applied when
+	// neither the x-llm-d-audio-duration-seconds request header nor the config
+	// supplies one.
+	defaultAudioDuration = 10 // seconds
+	// audioTokensPerSecond maps a clip's duration to placeholder tokens in dynamic
+	// mode (duration*tokensPerSecond). The default approximates the ~25 tokens/s
+	// of a pooled Whisper-style audio encoder (e.g. qwen omni).
+	audioTokensPerSecond = 25
 )
 
 // imageEstimator estimates an image's placeholder-token count from configured or
@@ -167,10 +179,19 @@ func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool
 }
 
 // mmMetadata carries per-request multimodal properties parsed from the
-// x-llm-d-* request headers. Only video is populated today; image and audio
-// fields follow the same pattern when their headers are added.
+// x-llm-d-* request headers. Image dimensions are decoded from the asset, so no
+// image field is carried here.
 type mmMetadata struct {
 	video videoMetadata
+	audio audioMetadata
+}
+
+// audioMetadata carries per-request audio properties parsed from the
+// x-llm-d-audio- request headers (metadata.AudioDurationHeaderKey). A zero field
+// means "not provided"; the estimator falls back to configuration and then
+// built-in defaults.
+type audioMetadata struct {
+	duration float64 // seconds
 }
 
 // videoMetadata carries per-request video properties parsed from the
@@ -342,4 +363,68 @@ func (e videoEstimator) tokensPerFrame(meta videoMetadata) int {
 		return n
 	}
 	return 1
+}
+
+// audioEstimator estimates an audio clip's placeholder-token count as
+// min(duration*tokensPerSecond, maxAudioTokens) in dynamic mode, or a fixed
+// constant in static mode. Duration comes from the request's audioMetadata when
+// provided and takes precedence over configuration; the config field is a
+// fallback. The zero value is valid and uses all built-in defaults.
+type audioEstimator struct {
+	mode           string
+	tokensPerSec   float64
+	staticToken    int
+	defDuration    float64
+	maxAudioTokens int
+}
+
+// newAudioEstimator resolves an estimateConfig into an audioEstimator, leaving
+// unset fields zero so placeholderCount applies built-in defaults.
+func newAudioEstimator(cfg *estimateConfig) audioEstimator {
+	if cfg == nil || cfg.Audio == nil {
+		return audioEstimator{}
+	}
+	aud := cfg.Audio
+	est := audioEstimator{
+		mode:           aud.Mode,
+		defDuration:    aud.DefaultDuration,
+		maxAudioTokens: aud.MaxAudioTokens,
+	}
+	if aud.Dynamic != nil {
+		est.tokensPerSec = aud.Dynamic.TokensPerSecond
+	}
+	if aud.Static != nil {
+		est.staticToken = aud.Static.StaticToken
+	}
+	return est
+}
+
+// placeholderCount estimates placeholder tokens for an audio clip from its
+// request metadata. Always >= 1 so every clip carries weight.
+func (e audioEstimator) placeholderCount(meta audioMetadata) int {
+	if e.mode == audioModeStatic {
+		if e.staticToken > 0 {
+			return e.staticToken
+		}
+		return 1
+	}
+	duration := meta.duration
+	if duration <= 0 {
+		duration = e.defDuration
+	}
+	if duration <= 0 {
+		duration = defaultAudioDuration
+	}
+	tps := e.tokensPerSec
+	if tps <= 0 {
+		tps = audioTokensPerSecond
+	}
+	tokens := int(duration * tps)
+	if e.maxAudioTokens > 0 && tokens > e.maxAudioTokens {
+		tokens = e.maxAudioTokens
+	}
+	if tokens < 1 {
+		tokens = 1
+	}
+	return tokens
 }

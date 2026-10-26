@@ -143,6 +143,14 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
 		}}}, nil
+	case body.TextToSpeech != nil:
+		// /v1/audio/speech synthesizes audio from text; tokenize that text as the
+		// input prompt.
+		allTokenIDs, _, err := b.tk.Render(ctx, fwkrh.PayloadMap{"prompt": body.TextToSpeech.Input})
+		if err != nil {
+			return nil, fmt.Errorf("tokenization failed: %w", err)
+		}
+		return fwkrh.NewTokenizedRequest(allTokenIDs), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping tokenization")
 	}

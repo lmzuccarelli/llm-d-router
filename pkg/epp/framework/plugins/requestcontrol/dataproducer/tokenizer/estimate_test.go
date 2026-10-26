@@ -806,3 +806,88 @@ func TestEstimateBackend_MessagesToolBlocksAffectPrefix(t *testing.T) {
 	assert.NotEqual(t, hashTokens(baseOut.Prompts[0].TokenIDs), hashTokens(toolResultOut.Prompts[0].TokenIDs),
 		"tool_result content was ignored by the prefix estimator")
 }
+
+// chatAudioBody builds a chat request carrying a single input_audio block.
+func chatAudioBody(data, format string) *fwkrh.InferenceRequestBody {
+	return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+		Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+			{Type: "input_audio", InputAudio: fwkrh.AudioBlock{Data: data, Format: format}},
+		}}}},
+	}}
+}
+
+// TestEstimateBackend_TextToSpeech asserts a /v1/audio/speech request estimates
+// its input text as real tokens, so the request size is no longer zero.
+func TestEstimateBackend_TextToSpeech(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		TextToSpeech: &fwkrh.TextToSpeechRequest{Input: "synthesize this sentence"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, tp)
+	assert.Greater(t, tp.TokenCount(), 0, "text-to-speech input must yield a non-zero estimate")
+}
+
+// TestParseAudioMetadataHeaders covers present, missing, and malformed duration
+// headers.
+func TestParseAudioMetadataHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		want    audioMetadata
+	}{
+		{"present", map[string]string{metadata.AudioDurationHeaderKey: "7.5"}, audioMetadata{duration: 7.5}},
+		{"empty", map[string]string{}, audioMetadata{}},
+		{"malformed", map[string]string{metadata.AudioDurationHeaderKey: "abc"}, audioMetadata{}},
+		{"non-positive", map[string]string{metadata.AudioDurationHeaderKey: "0"}, audioMetadata{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parseAudioMetadataHeaders(tc.headers))
+		})
+	}
+}
+
+// TestAudioEstimator covers the dynamic default, header-driven duration, config
+// default duration, static mode, and the token cap.
+func TestAudioEstimator(t *testing.T) {
+	// Dynamic default: defaultAudioDuration * audioTokensPerSecond.
+	assert.Equal(t, defaultAudioDuration*audioTokensPerSecond,
+		audioEstimator{}.placeholderCount(audioMetadata{}))
+
+	// Header-provided duration takes precedence and scales the count.
+	assert.Equal(t, int(4*audioTokensPerSecond),
+		audioEstimator{}.placeholderCount(audioMetadata{duration: 4}))
+
+	// Config default duration applies when the request carries none.
+	cfgDefault := newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{DefaultDuration: 20}})
+	assert.Equal(t, 20*audioTokensPerSecond, cfgDefault.placeholderCount(audioMetadata{}))
+
+	// Dynamic tokens-per-second knob.
+	tps := newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{Dynamic: &dynamicAudioConfig{TokensPerSecond: 50}}})
+	assert.Equal(t, int(4*50.0), tps.placeholderCount(audioMetadata{duration: 4}))
+
+	// Static mode emits a constant regardless of duration.
+	static := newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{Mode: audioModeStatic, Static: &staticAudioConfig{StaticToken: 32}}})
+	assert.Equal(t, 32, static.placeholderCount(audioMetadata{duration: 999}))
+
+	// MaxAudioTokens caps the dynamic count.
+	capped := newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{MaxAudioTokens: 10}})
+	assert.Equal(t, 10, capped.placeholderCount(audioMetadata{duration: 100}))
+}
+
+// TestEstimateBackend_ChatAudioDurationWeighting asserts chat audio content is
+// weighted by the header duration, so the placeholder count is not a flat
+// byte-length estimate.
+func TestEstimateBackend_ChatAudioDurationWeighting(t *testing.T) {
+	body := chatAudioBody("AAAA", "wav")
+
+	short, err := estimateBackend{}.produce(withMMMetadata(context.Background(), mmMetadata{audio: audioMetadata{duration: 2}}), body)
+	require.NoError(t, err)
+	long, err := estimateBackend{}.produce(withMMMetadata(context.Background(), mmMetadata{audio: audioMetadata{duration: 30}}), body)
+	require.NoError(t, err)
+
+	require.Len(t, short.Prompts[0].MultiModalFeatures, 1)
+	require.Len(t, long.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, fwkrh.ModalityAudio, short.Prompts[0].MultiModalFeatures[0].Modality)
+	assert.Less(t, short.Prompts[0].MultiModalFeatures[0].Length, long.Prompts[0].MultiModalFeatures[0].Length,
+		"longer audio must occupy more placeholder tokens")
+}

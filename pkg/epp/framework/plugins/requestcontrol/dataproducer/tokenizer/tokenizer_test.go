@@ -116,6 +116,17 @@ func TestPluginFactory_Validation(t *testing.T) {
 			errContain: "estimate.image.mode must be",
 		},
 		{
+			name:      "estimate audio static mode parses",
+			params:    `{"estimate":{"audio":{"mode":"static","static":{"staticToken":16}}}}`,
+			expectErr: false,
+		},
+		{
+			name:       "invalid estimate audio mode",
+			params:     `{"estimate":{"audio":{"mode":"bogus"}}}`,
+			expectErr:  true,
+			errContain: "estimate.audio.mode must be",
+		},
+		{
 			name:       "invalid JSON",
 			params:     `{invalid}`,
 			expectErr:  true,
@@ -176,6 +187,28 @@ func TestProduce_PopulatesTokenizedRequest(t *testing.T) {
 	assert.Equal(t, 20, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[1].Offset)
 	assert.Equal(t, "hash-b", req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[1].Hash)
 	assert.Equal(t, fwkrh.ModalityImage, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[0].Modality)
+}
+
+func TestProduce_TextToSpeechRendersInputText(t *testing.T) {
+	var gotPrompt any
+	tok := &mockTokenizer{
+		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
+			pm, _ := payload.AsMap()
+			gotPrompt = pm["prompt"]
+			return [][]uint32{{7, 8, 9}}, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			TextToSpeech: &fwkrh.TextToSpeechRequest{Input: "read this aloud"},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.Equal(t, "read this aloud", gotPrompt)
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, 3, req.Body.TokenizedRequest.TokenCount())
 }
 
 func TestProduce_SkipsWhenAlreadyPopulated(t *testing.T) {

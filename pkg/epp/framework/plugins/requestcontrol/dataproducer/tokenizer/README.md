@@ -100,6 +100,25 @@ apply to every video in the request.
 | `estimate.video.defaultDuration`      | `10`      | Video length in seconds for frame counting; fallback for the `x-llm-d-video-duration-seconds` header.                                                       |
 | `estimate.video.maxVideoTokens`       | –         | Overall placeholder cap for a video (0 = uncapped).                                                                                                         |
 
+Audio estimation is `min(duration × tokensPerSecond, maxAudioTokens)` in dynamic
+mode, or a constant per-clip count in static mode. It covers chat `input_audio`
+content and `/v1/audio/speech` requests. Clip duration comes from the
+`x-llm-d-audio-duration-seconds` request header when present; otherwise it falls
+back to `defaultDuration` and then the built-in default. The header is
+request-level, so it applies to every audio clip in the request.
+
+| Request header                  | Format          | Description                                     |
+| ------------------------------- | --------------- | ----------------------------------------------- |
+| `x-llm-d-audio-duration-seconds`| float seconds   | Audio clip length; overrides `defaultDuration`. |
+
+| Parameter                               | Default   | Description                                                                 |
+| --------------------------------------- | --------- | -------------------------------------------------------------------------- |
+| `estimate.audio.mode`                   | `dynamic` | `dynamic` (duration×tokensPerSecond) or `static` (a constant per-clip count). |
+| `estimate.audio.dynamic.tokensPerSecond`| `25`      | Dynamic-mode tokens-per-second of audio.                                    |
+| `estimate.audio.static.staticToken`     | –         | Static-mode per-clip placeholder count.                                     |
+| `estimate.audio.defaultDuration`        | `10`      | Clip length in seconds; fallback for the `x-llm-d-audio-duration-seconds` header. |
+| `estimate.audio.maxAudioTokens`         | –         | Overall placeholder cap for a clip (0 = uncapped).                          |
+
 ## Failure mode
 
 Per-request errors are returned to the Director, which currently logs and

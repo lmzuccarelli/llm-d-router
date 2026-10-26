@@ -42,12 +42,30 @@ const bytesPerToken = 4
 type estimateBackend struct {
 	img imageEstimator
 	vid videoEstimator
+	aud audioEstimator
 }
 
 // parseMMMetadataHeaders reads the x-llm-d-* request headers into an mmMetadata.
-// Only video is populated today; image and audio parsing slot in here later.
+// Image dimensions are decoded from the asset, so only video and audio are
+// header-driven.
 func parseMMMetadataHeaders(headers map[string]string) mmMetadata {
-	return mmMetadata{video: parseVideoMetadataHeaders(headers)}
+	return mmMetadata{
+		video: parseVideoMetadataHeaders(headers),
+		audio: parseAudioMetadataHeaders(headers),
+	}
+}
+
+// parseAudioMetadataHeaders reads the x-llm-d-audio- request headers into an
+// audioMetadata. A missing or malformed value leaves its field zero so the
+// estimator falls back to config and then defaults.
+func parseAudioMetadataHeaders(headers map[string]string) audioMetadata {
+	var meta audioMetadata
+	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.AudioDurationHeaderKey); ok {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
+			meta.duration = v
+		}
+	}
+	return meta
 }
 
 // mmMetadataCtxKey keys the request-scoped mmMetadata on the context, carrying it
@@ -188,6 +206,10 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 		return []byte(body.Completions.Prompt.PlainText()), nil
 	case body.Embeddings != nil:
 		return json.Marshal(body.Embeddings.Input)
+	case body.TextToSpeech != nil:
+		// /v1/audio/speech synthesizes audio from text; the input estimate is the
+		// text to synthesize.
+		return []byte(body.TextToSpeech.Input), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping estimation")
 	}
@@ -231,7 +253,7 @@ func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiMod
 			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(meta.video))
 		case "input_audio", "audio_url":
 			data := block.InputAudio.Data + block.InputAudio.Format
-			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, assetPlaceholderCount(len(data)))
+			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, b.aud.placeholderCount(meta.audio))
 		}
 	}
 	return out, features
@@ -306,15 +328,6 @@ func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkr
 		Length:   count,
 	})
 	return out, features
-}
-
-// assetPlaceholderCount derives a deterministic placeholder count (>= 1) from an
-// asset's byte length for modalities without a dedicated estimator.
-func assetPlaceholderCount(dataLen int) int {
-	if n := (dataLen + bytesPerToken - 1) / bytesPerToken; n > 0 {
-		return n
-	}
-	return 1
 }
 
 // packBytes packs bytes into little-endian uint32 tokens (zero-padded tail).
